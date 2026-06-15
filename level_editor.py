@@ -27,7 +27,7 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
     bl_label = "シーン出力"
     bl_description = "シーン情報をExportします"
     
-    # 出力するファイルの拡張子を .json に変更
+    # 出力するファイルの拡張子を .json に
     filename_ext = ".json"
     bl_options = {'REGISTER', 'UNDO'}
     
