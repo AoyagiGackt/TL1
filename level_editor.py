@@ -92,7 +92,7 @@ class MYADDON_OT_create_ico_sphere(bpy.types.Operator):
         return {'FINISHED'}
 
 
-# 追加：オペレータ カスタムプロパティ['file_name']追加
+# オペレータ カスタムプロパティ['file_name']
 class MYADDON_OT_add_filename(bpy.types.Operator):
     bl_idname = "myaddon.myaddon_ot_add_filename"
     bl_label = "FileName 追加"
