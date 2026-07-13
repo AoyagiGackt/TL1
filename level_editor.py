@@ -43,8 +43,10 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
         
         # オブジェクトのローカルトランスフォームから平行移動、回転、スケールを抽出
         trans, rot, scale = object.matrix_local.decompose()
+        
         # 回転を Quaternion から Euler (3軸での回転角) に変換
         rot = rot.to_euler()
+        
         # ラジアンから度数法に変換
         rot.x = math.degrees(rot.x)
         rot.y = math.degrees(rot.y)
@@ -121,6 +123,147 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
         print("シーン情報をExportしました")
         return {'FINISHED'}
 
+class MYADDON_OT_import_level01(bpy.types.Operator, bpy_extras.io_utils.ImportHelper):
+    bl_idname = "myaddon.myaddon_ot_import_level01"
+    bl_label = "レベルデータの読み込み"
+    bl_description = "JSONファイルを汎用的に読み込みます"
+    
+    filepath: bpy.props.StringProperty(default="level01.json")
+    filename_ext = ".json"
+    
+    # position系のキーはオブジェクト自身の位置として消費するので、
+    # スポーン地点マーカー化の対象からは除外する
+    POSITION_KEYS = ["translation", "position", "pos", "location"]
+
+    # JSON上の軸名 -> Blender座標系でその軸方向へ1ステップ進めるベクトル
+    AXIS_STEP_VECTOR = {
+        "x": mathutils.Vector((1.0, 0.0, 0.0)),
+        "y": mathutils.Vector((0.0, 0.0, 1.0)),
+        "z": mathutils.Vector((0.0, 1.0, 0.0)),
+    }
+
+    def json_pos_to_blender(self, data_dict):
+        """position系のキー（JSON: Y軸が上）をBlenderの座標系（Z軸が上）に変換する"""
+        for pos_key in self.POSITION_KEYS:
+            if pos_key in data_dict and isinstance(data_dict[pos_key], list) and len(data_dict[pos_key]) >= 3:
+                x, y, z = data_dict[pos_key][0], data_dict[pos_key][1], data_dict[pos_key][2]
+                return [x, z, y]
+        return [0.0, 0.0, 0.0]
+
+    def create_blender_object(self, data_dict, parent=None):
+        """1つのデータからオブジェクトを生成し、すべてのキーをカスタムプロパティに保存する"""
+        # オブジェクト名になりそうなキーを自動検索（なければデータ型を名前にする）
+        obj_name = data_dict.get("name") or data_dict.get("comment") or data_dict.get("type") or "ImportedObject"
+
+        # 位置になりそうなキーを自動検索（XYZの3要素リスト）
+        loc = self.json_pos_to_blender(data_dict)
+
+        # とりあえず配置用の空オブジェクトを作成
+        bpy.ops.object.empty_add(type='CUBE', radius=0.5, location=loc)
+        new_obj = bpy.context.object
+        new_obj.name = str(obj_name)
+
+        if parent:
+            new_obj.parent = parent
+            new_obj.matrix_parent_inverse = parent.matrix_world.inverted()
+
+        # JSON内にあるすべてのデータをカスタムプロパティとしてオブジェクトに丸ごと記憶させる
+        for key, value in data_dict.items():
+            # 子ノードリストそのまま保存できないので文字列化して保存
+            if key == "children" or isinstance(value, (dict, list)):
+                new_obj[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                new_obj[key] = value
+
+        return new_obj
+
+    def create_blender_row(self, data_dict, parent=None):
+        """type="row" のデータを、position起点からaxis方向にcount個・step間隔で実際に並べて生成する"""
+        obj_name = data_dict.get("comment") or data_dict.get("name") or "row"
+
+        base_loc = mathutils.Vector(self.json_pos_to_blender(data_dict))
+        axis = data_dict.get("axis", "x")
+        count = int(data_dict.get("count", 1))
+        step = float(data_dict.get("step", 1.0))
+        step_vector = self.AXIS_STEP_VECTOR.get(axis, self.AXIS_STEP_VECTOR["x"])
+
+        # 行全体をまとめる親エンプティ（メタ情報はここに保持）
+        bpy.ops.object.empty_add(type='PLAIN_AXES', radius=0.5, location=base_loc)
+        row_obj = bpy.context.object
+        row_obj.name = str(obj_name)
+        if parent:
+            row_obj.parent = parent
+            row_obj.matrix_parent_inverse = parent.matrix_world.inverted()
+
+        for key, value in data_dict.items():
+            if key == "children" or isinstance(value, (dict, list)):
+                row_obj[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                row_obj[key] = value
+
+        # count個分のブロックを実際に等間隔配置
+        for i in range(count):
+            block_loc = base_loc + step_vector * (step * i)
+            bpy.ops.object.empty_add(type='CUBE', radius=0.5, location=block_loc)
+            block_obj = bpy.context.object
+            block_obj.name = f"{obj_name}_{i:02d}"
+            block_obj.parent = row_obj
+            block_obj.matrix_parent_inverse = row_obj.matrix_world.inverted()
+
+        return row_obj
+
+    def create_spawn_marker(self, name, position, parent=None):
+        """[x, y, z] 形式の座標配列をスポーン地点マーカーとして生成する"""
+        x, y, z = position
+        bpy.ops.object.empty_add(type='SPHERE', radius=0.3, location=(x, z, y))
+        marker = bpy.context.object
+        marker.name = str(name)
+        if parent:
+            marker.parent = parent
+            marker.matrix_parent_inverse = parent.matrix_world.inverted()
+        return marker
+
+    def parse_any_json_recursive(self, data, parent=None):
+        """どんな構造のJSONでも再帰的に走査してBlenderオブジェクト化する"""
+        if isinstance(data, dict):
+            # type="row" ならブロックを実際に並べて生成、それ以外は単体オブジェクトとして生成
+            if data.get("type") == "row" and "axis" in data and "count" in data:
+                current_obj = self.create_blender_row(data, parent)
+            else:
+                current_obj = self.create_blender_object(data, parent)
+
+            # 自身の下にさらに隠れた子リストやオブジェクト配列がないか探して再帰
+            for key, value in data.items():
+                if key == "children" or key in self.POSITION_KEYS:
+                    continue
+                # [x, y, z] のような座標そのものの配列は、子オブジェクトではなく
+                # スポーン地点マーカーとして直接生成する（playerSpawn / enemySpawn など）
+                if isinstance(value, list) and len(value) == 3 and all(isinstance(v, (int, float)) for v in value):
+                    self.create_spawn_marker(key, value, current_obj)
+                elif isinstance(value, (dict, list)):
+                    self.parse_any_json_recursive(value, current_obj)
+
+            # 子リスト構造があれば処理
+            if "children" in data and isinstance(data["children"], list):
+                for child_data in data["children"]:
+                    self.parse_any_json_recursive(child_data, current_obj)
+
+        elif isinstance(data, list):
+            # 配列なら、中身をバラして走査
+            for item in data:
+                self.parse_any_json_recursive(item, parent)
+
+    def execute(self, context):
+        with open(self.filepath, "rt", encoding="utf-8") as file:
+            data = json.load(file)
+            
+        print(f"--- {self.filepath} の汎用解析を開始 ---")
+        
+        # ルートから全自動解析
+        self.parse_any_json_recursive(data)
+            
+        self.report({'INFO'}, "JSONデータを読み込み、プロパティを保持したオブジェクトを生成しました")
+        return {'FINISHED'}
 
 # ICO球を生成するオペレータークラス
 class MYADDON_OT_create_ico_sphere(bpy.types.Operator):
@@ -210,6 +353,9 @@ class TOPBAR_MT_my_menu(bpy.types.Menu):
         layout.operator("wm.url_open_preset", text="Manual", icon='HELP')
         layout.separator()
         layout.operator(MYADDON_OT_create_ico_sphere.bl_idname, text="ICO球生成", icon='MESH_ICOSPHERE')
+        layout.separator()
+        layout.operator(MYADDON_OT_import_level01.bl_idname, text="レベルデータの読み込み", icon='IMPORT')
+        
         layout.operator(MYADDON_OT_export_scene.bl_idname, text="シーン出力", icon='EXPORT')
 
     def submenu(self, context):
@@ -291,6 +437,7 @@ class DrawCollider:
 classes = (
     MYADDON_OT_create_ico_sphere,
     MYADDON_OT_export_scene,
+    MYADDON_OT_import_level01,
     TOPBAR_MT_my_menu,
     MYADDON_OT_add_filename,
     OBJECT_PT_file_name,
